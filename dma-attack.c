@@ -4,6 +4,7 @@
 #include <linux/version.h>	/* versioning */
 #include <linux/highmem.h>
 #include <linux/slab.h>
+#include <linux/io.h>
 
 #define DMAENABLE 0x00000ff0	//bit 0 should be set to 1 to enable channel 0. bit 1 enables channel 1, etc.
 #define DMACH(n) (0x100*(n))
@@ -37,13 +38,13 @@ struct DmaChannelHeader {
 	//2     INT; set when current CB ends and its INTEN=1. Write a 1 to this register to clear it
 	//1     END; set when the transfer defined by current CB is complete. Write 1 to clear.
 	//0     ACTIVE; write 1 to activate DMA (load the CB before hand)
-	void *CONBLK_AD;	//Control Block Address
+	uint32_t CONBLK_AD;	//Control Block Address
 	uint32_t TI;		//transfer information; see DmaControlBlock.TI for description
-	void *SOURCE_AD;	//Source address
-	void *DEST_AD;		//Destination address
+	uint32_t SOURCE_AD;	//Source address
+	uint32_t DEST_AD;		//Destination address
 	uint32_t TXFR_LEN;	//transfer length.
 	uint32_t STRIDE;	//2D Mode Stride. Only used if TI.TDMODE = 1
-	void *NEXTCONBK;	//Next control block. Must be 256-bit aligned (32 bytes; 8 words)
+	uint32_t NEXTCONBK;	//Next control block. Must be 256-bit aligned (32 bytes; 8 words)
 	uint32_t DEBUG;		//controls debug settings
 };
 
@@ -66,11 +67,11 @@ struct DmaControlBlock {
 	//2     unused (0)
 	//1     TDMODE; set to 1 to enable 2D mode
 	//0     INTEN;  set to 1 to generate an interrupt upon completion
-	void *SOURCE_AD;	//Source address
-	void *DEST_AD;		//Destination address
+	uint32_t SOURCE_AD;	//Source address
+	uint32_t DEST_AD;		//Destination address
 	uint32_t TXFR_LEN;	//transfer length.
 	uint32_t STRIDE;	//2D Mode Stride. Only used if TI.TDMODE = 1
-	void *NEXTCONBK;	//Next control block. Must be 256-bit aligned (32 bytes; 8 words)
+	uint32_t NEXTCONBK;	//Next control block. Must be 256-bit aligned (32 bytes; 8 words)
 	uint32_t _reserved[2];
 };
 
@@ -88,7 +89,7 @@ static void dma_attack_cleanup(void)
 	printk("dma_attack exit\n");
 }
 
-static long dma_start = 0x3f007000L;
+static phys_addr_t dma_start = 0x3f007000L;
 //static int  dma_offset= ;
 static int dma_attack_init(void)
 {
@@ -97,15 +98,16 @@ static int dma_attack_init(void)
 	void *physCbPage;
 	char *virtSrcPage;
 	void *physSrcPage;
-	void *virtDstPage;
+	char *virtDstPage;
 	void *physDstPage;
 	struct DmaControlBlock *cb1;
 	struct DmaChannelHeader *dmaHeader;
+	uint32_t cs = 0;
 
 	int dmaChNum = 5;
 	dmaHeader = kmalloc(4096, GFP_KERNEL);
 
-	start = kmap((void *) &dma_start);
+	start = (void*) ioremap(dma_start, 4096);
 	virtCbPage = kmalloc(4096, GFP_KERNEL);
 	physCbPage = (void *) virt_to_phys(virtCbPage);
 
@@ -127,12 +129,14 @@ static int dma_attack_init(void)
 
 	//fill the control block:
 	cb1->TI = DMA_CB_TI_SRC_INC | DMA_CB_TI_DEST_INC;	//after each byte copied, we want to increment the source and destination address of the copy, otherwise we'll be copying to the same address.
-	cb1->SOURCE_AD = physSrcPage;	//set source and destination DMA address
-	cb1->DEST_AD = physDstPage;
-	cb1->TXFR_LEN = 12;	//transfer 12 bytes
+	cb1->SOURCE_AD = (uint32_t)physSrcPage;	//set source and destination DMA address
+	cb1->DEST_AD = (uint32_t)physDstPage;
+	cb1->TXFR_LEN = 5;	//transfer 12 bytes
 	cb1->STRIDE = 0;	//no 2D stride
 	cb1->NEXTCONBK = 0;	//no next control block
 
+	virtDstPage[0] = 'a';
+	virtDstPage[1] = 0;
 
 	printk("Before Dma: %s\n", (char *) virtDstPage);
 	writeBitmasked(start + DMAENABLE / 4, 1 << dmaChNum,
@@ -142,7 +146,7 @@ static int dma_attack_init(void)
 	dmaHeader->CS = DMA_CS_RESET;	//make sure to disable dma first.
 	mdelay(1000);		//give time for the reset command to be handled.
 	dmaHeader->DEBUG = DMA_DEBUG_READ_ERROR | DMA_DEBUG_FIFO_ERROR | DMA_DEBUG_READ_LAST_NOT_SET_ERROR;	// clear debug error flags
-	dmaHeader->CONBLK_AD = physCbPage;	//we have to point it to the PHYSICAL address of the control block (cb1)
+	dmaHeader->CONBLK_AD = (uint32_t)physCbPage;	//we have to point it to the PHYSICAL address of the control block (cb1)
 	dmaHeader->CS = DMA_CS_ACTIVE;	//set active bit, but everything else is 0.
 	mdelay(1000);
 
