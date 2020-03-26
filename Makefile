@@ -1,11 +1,13 @@
 TARGET= dma_spoof
 OBJS  = dma-attack.o
-CC=/opt/gcc-linaro-4.9-2015.05-x86_64_aarch64-linux-gnu/bin/aarch64-linux-gnu-gcc
-LD=/opt/gcc-linaro-4.9-2015.05-x86_64_aarch64-linux-gnu/bin/aarch64-linux-gnu-ld
-CURRENT=`uname -r`
-KDIR = ../../kernel_obj/
-PWD = $(shell pwd) 
+CC=/home/ron/projects/optee-project/toolchains/aarch64/bin/aarch64-linux-gnu-gcc
 
+
+LD=/home/ron/projects/optee-project/toolchains/aarch64/bin/aarch64-linux-gnu-ld
+CURRENT=`uname -r`
+KDIR = /home/ron/projects/optee-project/linux/
+PWD = $(shell pwd) 
+CFLAGS_MODULE +=-mcmodel=large -mpc-relative-literal-loads
 obj-m      := $(TARGET).o
 $(TARGET)-objs   := $(OBJS)
 
