@@ -1,5 +1,5 @@
-TARGET= dma_spoof
-OBJS  = dma-attack.o
+TARGET= dma_reader
+OBJS  = dma-reader.o
 CC=/home/ron/projects/optee-project/toolchains/aarch64/bin/aarch64-linux-gnu-gcc
 
 

