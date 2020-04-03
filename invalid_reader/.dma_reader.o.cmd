@@ -1,0 +1,1 @@
+cmd_/home/ron/projects/dma_repo_all/page_reader/dma_reader.o := /home/ron/projects/optee-project/toolchains/aarch64/bin/aarch64-linux-gnu-ld  -maarch64linux   -r -o /home/ron/projects/dma_repo_all/page_reader/dma_reader.o /home/ron/projects/dma_repo_all/page_reader/dma-reader.o 
