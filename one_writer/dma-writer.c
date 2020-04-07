@@ -21,8 +21,8 @@ static void dma_reader_cleanup(void)
 static int addr = 0;
 module_param(addr,int,0660);
 
-static int data = 0;
-module_param(data,int,0660);
+static long data = 0;
+module_param(data,long,0660);
 
 static int offset = 0;
 module_param(offset,int,0660);
@@ -36,7 +36,7 @@ static int __init dma_reader_init(void)
 	void* physSrcPage;
 	volatile struct DmaChannelHeader *dmaHeader;
 
-	int dmaChNum = 7;
+	int dmaChNum = 6;
 
 	start = (void*) ioremap_nocache(dma_start, 4096);
 
@@ -59,17 +59,10 @@ static int __init dma_reader_init(void)
 	// Set the dma header
 	dmaHeader = (volatile struct DmaChannelHeader *) (start + (DMACH(dmaChNum)) / 4);
 
-	if (dma_tx(dmaHeader, physSrcPage, physDstPage, 4096) != 0)
-	{
-		printk("Failed dma transaction\n");
-		return -1;
-	}
-	// printk("Read from %x the data: %x\n", physDstPage, *(uint32_t*)virtDstPage);
-	dma_enable(start, dmaChNum);
-
 	((uint32_t*)virtDstPage)[offset] = data;
 
-	if (dma_tx(dmaHeader, physDstPage, physSrcPage, 4096) != 0)
+	printk("Writing the data: %x\n", ((uint32_t*)virtDstPage)[offset]);
+	if (dma_tx(dmaHeader, physDstPage, physSrcPage, 4) != 0)
 	{
 		printk("Failed dma transaction\n");
 		return -1;

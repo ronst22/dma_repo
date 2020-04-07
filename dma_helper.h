@@ -16,6 +16,7 @@
 //flags used in the DmaChannelHeader struct:
 #define DMA_CS_RESET (1<<31)
 #define DMA_CS_ACTIVE (1<<0)
+#define DMA_CS_PAUSED (1<<4)
 
 #define DMA_DEBUG_READ_ERROR (1<<2)
 #define DMA_DEBUG_FIFO_ERROR (1<<1)
@@ -25,7 +26,9 @@
 #define DMA_CB_TI_DEST_INC (1<<4)
 #define DMA_CB_TI_SRC_INC (1<<8)
 #define DMA_CB_TI_WAIT_RESP (1<<3)
-#define DMA_CB_TI_WAITS ((1 << 22) | (1 << 24))
+#define DMA_CB_TI_WAITS ((1 << 22) | (1 << 24) | (1 << 23))
+#define DMA_CB_TI_PERMAP ((1 << 16) | (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20))
+#define DMA_CB_TI_NO_WIDE_BURST (1 << 26)
 
 struct file *file_open(const char *path, int flags, int rights) 
 {
@@ -134,7 +137,7 @@ void writeBitmasked(volatile uint32_t * dest, uint32_t mask,
 	*dest = new;		//added safety for when crossing memory barriers.
 }
 
-void dma_enable(void* start, int dmaChNum)
+void dma_enable(volatile void* start, int dmaChNum)
 {
 	writeBitmasked(start + DMAENABLE / 4, 1 << dmaChNum, 1 << dmaChNum);
 	mdelay(1000);
@@ -156,8 +159,9 @@ int dma_tx(volatile struct DmaChannelHeader* dmaHeader, void* physSrcPage, void*
 	volatile struct DmaControlBlock* cb1;
 	int ret;
 
-	memset((void*)dmaHeader, 0, sizeof(struct DmaChannelHeader));
+	// memset((void*)dmaHeader, 0, sizeof(struct DmaChannelHeader));
 	dmaHeader->CS = DMA_CS_RESET;	//make sure to disable dma first.
+	dmaHeader->CS = DMA_CS_PAUSED;
 	mdelay(2000);
 
 	virtCbPage = (void*)__get_dma_pages(GFP_ATOMIC, 0);
@@ -169,15 +173,16 @@ int dma_tx(volatile struct DmaChannelHeader* dmaHeader, void* physSrcPage, void*
 	}
 
 	physCbPage = (void *) virt_to_phys(virtCbPage);
-	memset(virtCbPage, 0, 4096);
+	// memset(virtCbPage, 0, 4096);
 
 	//dedicate the first 8 words of this page to holding the cb.
 	cb1 = (struct DmaControlBlock *) virtCbPage;
 
 	//fill the control block:
-	cb1->TI = DMA_CB_TI_SRC_INC | DMA_CB_TI_DEST_INC | DMA_CB_TI_WAITS | DMA_CB_TI_WAIT_RESP;	//after each byte copied, we want to increment the source and destination address of the copy, otherwise we'll be copying to the same address.
-	cb1->SOURCE_AD = (uint32_t)physSrcPage;	//set source and destination DMA address
-	cb1->DEST_AD = (uint32_t)physDstPage;
+	cb1->TI = DMA_CB_TI_SRC_INC | DMA_CB_TI_DEST_INC | DMA_CB_TI_WAITS | DMA_CB_TI_WAIT_RESP | DMA_CB_TI_NO_WIDE_BURST;	//after each byte copied, we want to increment the source and destination address of the copy, otherwise we'll be copying to the same address.
+	// cb1->TI = DMA_CB_TI_SRC_INC | DMA_CB_TI_DEST_INC | DMA_CB_TI_WAIT_RESP;	//after each byte copied, we want to increment the source and destination address of the copy, otherwise we'll be copying to the same address.
+	cb1->SOURCE_AD = (uint32_t)physSrcPage | 0xc0000000;	//set source and destination DMA address
+	cb1->DEST_AD = (uint32_t)physDstPage | 0xc0000000;
 	cb1->TXFR_LEN = size;	//transfer 12 bytes
 	cb1->STRIDE = 0;	//no 2D stride
 	cb1->NEXTCONBK = 0;	//no next control block
@@ -194,16 +199,24 @@ int dma_tx(volatile struct DmaChannelHeader* dmaHeader, void* physSrcPage, void*
 	dmaHeader->CS = DMA_CS_RESET;	//make sure to disable dma first.
 	mdelay(2000);		//give time for the reset command to be handled.
 	dmaHeader->DEBUG = DMA_DEBUG_READ_ERROR | DMA_DEBUG_FIFO_ERROR | DMA_DEBUG_READ_LAST_NOT_SET_ERROR;	// clear debug error flags
-	dmaHeader->CONBLK_AD = (uint32_t)physCbPage;	//we have to point it to the PHYSICAL address of the control block (cb1)
+	dmaHeader->CONBLK_AD = (uint32_t)physCbPage | 0xc0000000;	//we have to point it to the PHYSICAL address of the control block (cb1)
 
+	printk("CURRENT SRC_ADDR: %x\n", dmaHeader->SOURCE_AD);
+	printk("CURRENT DEST_ADDR: %x\n", dmaHeader->DEST_AD);
 	printk("DMA STATUS REGISTER (After CB Before Active) %x\n", dmaHeader->CS);
 	dmaHeader->CS = DMA_CS_ACTIVE;	//set active bit, but everything else is 0.
 	mdelay(9000);
 
 	printk("DMA STATUS REGISTER (AFTER Tx) %x\n", dmaHeader->CS);
 	printk("TI STATUS AFTER: %x\n", cb1->TI);
+	printk("DMA CONTROL BLOCK ADDR AFTER TX %x\n", dmaHeader->CONBLK_AD);
 
-	free_pages((unsigned long)virtCbPage, 0);	
-	ret = (dmaHeader->SOURCE_AD - (uint32_t)physSrcPage - size);
+	free_pages((unsigned long)virtCbPage, 0);
+	printk("AFTER CURRENT SRC_ADDR: %x\n", dmaHeader->SOURCE_AD);
+	printk("AFTER CURRENT DEST_ADDR: %x\n", dmaHeader->DEST_AD);
+	printk("dmaHeader src: %x\nphysrcpage -size: %x", dmaHeader->SOURCE_AD, (((uint32_t)physSrcPage | 0xc0000000) + size));
+	ret = (dmaHeader->SOURCE_AD - (((uint32_t)physSrcPage | 0xc0000000) + size));
+	mdelay(500);
+	// ret = 0;
 	return ret;
 }
