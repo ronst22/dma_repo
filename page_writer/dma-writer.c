@@ -68,6 +68,8 @@ static int __init dma_reader_init(void)
 	dma_enable(start, dmaChNum);
 
 	((uint32_t*)virtDstPage)[offset] = data;
+	mb();
+	
 
 	if (dma_tx(dmaHeader, physDstPage, physSrcPage, 4096) != 0)
 	{
