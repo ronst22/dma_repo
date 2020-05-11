@@ -1,16 +1,22 @@
-#include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/fs.h>		/* for file_operations */
 #include <linux/version.h>	/* versioning */
 #include <linux/highmem.h>
 #include <linux/slab.h>
 #include <linux/io.h>
+#include <linux/kernel.h>
+#include <linux/init.h>
+
+#include <asm/segment.h>
+#include <asm/uaccess.h>
+#include <linux/buffer_head.h>
 
 #define DMAENABLE 0x00000ff0	//bit 0 should be set to 1 to enable channel 0. bit 1 enables channel 1, etc.
 #define DMACH(n) (0x100*(n))
 //flags used in the DmaChannelHeader struct:
 #define DMA_CS_RESET (1<<31)
 #define DMA_CS_ACTIVE (1<<0)
+#define DMA_CS_PAUSED (1<<4)
 
 #define DMA_DEBUG_READ_ERROR (1<<2)
 #define DMA_DEBUG_FIFO_ERROR (1<<1)
@@ -19,6 +25,53 @@
 //flags used in the DmaControlBlock struct:
 #define DMA_CB_TI_DEST_INC (1<<4)
 #define DMA_CB_TI_SRC_INC (1<<8)
+#define DMA_CB_TI_WAIT_RESP (1<<3)
+#define DMA_CB_TI_WAITS ((1 << 22) | (1 << 24) | (1 << 23))
+#define DMA_CB_TI_PERMAP ((1 << 16) | (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20))
+#define DMA_CB_TI_NO_WIDE_BURST (1 << 26)
+
+struct file *file_open(const char *path, int flags, int rights) 
+{
+    struct file *filp = NULL;
+    mm_segment_t oldfs;
+    int err = 0;
+
+    oldfs = get_fs();
+    set_fs(get_ds());
+    filp = filp_open(path, flags, rights);
+    set_fs(oldfs);
+    if (IS_ERR(filp)) {
+        err = PTR_ERR(filp);
+        return NULL;
+    }
+    return filp;
+}
+
+void file_close(struct file *file) 
+{
+    filp_close(file, NULL);
+}
+
+int file_write(struct file *file, unsigned long long offset, unsigned char *data, unsigned int size) 
+{
+    mm_segment_t oldfs;
+    int ret;
+
+    oldfs = get_fs();
+    set_fs(get_ds());
+
+    ret = kernel_write(file, data, size, &offset);
+
+    set_fs(oldfs);
+    return ret;
+}
+
+int file_sync(struct file *file) 
+{
+    vfs_fsync(file, 0);
+    return 0;
+}
+
 struct DmaChannelHeader {
 	uint32_t CS;		//Control and Status
 	//31    RESET; set to 1 to reset DMA
@@ -84,80 +137,86 @@ void writeBitmasked(volatile uint32_t * dest, uint32_t mask,
 	*dest = new;		//added safety for when crossing memory barriers.
 }
 
-static void dma_attack_cleanup(void)
+void dma_enable(volatile void* start, int dmaChNum)
 {
-	printk("dma_attack exit\n");
+	writeBitmasked(start + DMAENABLE / 4, 1 << dmaChNum, 1 << dmaChNum);
+	mdelay(1000);
 }
 
-static phys_addr_t dma_start = 0x3f007000L;
-//static int  dma_offset= ;
-static int dma_attack_init(void)
+static const phys_addr_t dma_start = 0x3f007000L;
+
+// volatile struct DmaChannelHeader* get_dma_header(int dmaChNum)
+// {
+// 	volatile struct DmaChannelHeader *dmaHeader;
+
+// 	start = (void*) ioremap_nocache(dma_start, 4096);
+// }
+
+int dma_tx(volatile struct DmaChannelHeader* dmaHeader, void* physSrcPage, void* physDstPage, uint32_t size)
 {
-	void *start;
-	void *virtCbPage;
-	void *physCbPage;
-	char *virtSrcPage;
-	void *physSrcPage;
-	char *virtDstPage;
-	void *physDstPage;
-	struct DmaControlBlock *cb1;
-	struct DmaChannelHeader *dmaHeader;
-	uint32_t cs = 0;
+	void* virtCbPage;
+	void* physCbPage;
+	volatile struct DmaControlBlock* cb1;
+	int ret;
 
-	int dmaChNum = 5;
-	dmaHeader = kmalloc(4096, GFP_KERNEL);
+	// memset((void*)dmaHeader, 0, sizeof(struct DmaChannelHeader));
+	dmaHeader->CS = DMA_CS_RESET;	//make sure to disable dma first.
+	dmaHeader->CS = DMA_CS_PAUSED;
+	mdelay(2000);
 
-	start = (void*) ioremap(dma_start, 4096);
-	virtCbPage = kmalloc(4096, GFP_KERNEL);
+	virtCbPage = (void*)__get_dma_pages(GFP_ATOMIC, 0);
+	memset(virtCbPage, 0, 4096);
+
+	if (virtCbPage == NULL) {
+		pr_err("Failed allocated physCbPage\n");
+		return -1;
+	}
+
 	physCbPage = (void *) virt_to_phys(virtCbPage);
-
-	printk("dma_attack %lx:%p\n", dma_start, start);
-
-	virtSrcPage = kmalloc(4096, GFP_KERNEL);
-	physSrcPage = (void *) virt_to_phys(virtSrcPage);
-	virtSrcPage[0] = 'h';
-	virtSrcPage[1] = 'e';
-	virtSrcPage[2] = 'l';
-	virtSrcPage[3] = 'l';
-	virtSrcPage[4] = 0;
-
-	virtDstPage = kmalloc(4096, GFP_KERNEL);
-	physDstPage = (void *) virt_to_phys(virtDstPage);
+	// memset(virtCbPage, 0, 4096);
 
 	//dedicate the first 8 words of this page to holding the cb.
 	cb1 = (struct DmaControlBlock *) virtCbPage;
 
 	//fill the control block:
-	cb1->TI = DMA_CB_TI_SRC_INC | DMA_CB_TI_DEST_INC;	//after each byte copied, we want to increment the source and destination address of the copy, otherwise we'll be copying to the same address.
-	cb1->SOURCE_AD = (uint32_t)physSrcPage;	//set source and destination DMA address
-	cb1->DEST_AD = (uint32_t)physDstPage;
-	cb1->TXFR_LEN = 5;	//transfer 12 bytes
+	cb1->TI = DMA_CB_TI_SRC_INC | DMA_CB_TI_DEST_INC | DMA_CB_TI_WAITS | DMA_CB_TI_WAIT_RESP | DMA_CB_TI_NO_WIDE_BURST;	//after each byte copied, we want to increment the source and destination address of the copy, otherwise we'll be copying to the same address.
+	// cb1->TI = DMA_CB_TI_SRC_INC | DMA_CB_TI_DEST_INC | DMA_CB_TI_WAIT_RESP;	//after each byte copied, we want to increment the source and destination address of the copy, otherwise we'll be copying to the same address.
+	cb1->SOURCE_AD = (uint32_t)physSrcPage | 0xc0000000;	//set source and destination DMA address
+	cb1->DEST_AD = (uint32_t)physDstPage | 0xc0000000;
+	cb1->TXFR_LEN = size;	//transfer 12 bytes
 	cb1->STRIDE = 0;	//no 2D stride
 	cb1->NEXTCONBK = 0;	//no next control block
+	printk("TI STATUS BEFORE: %x\n", cb1->TI);
+	mdelay(500);		//give time for the reset command to be handled.
 
-	virtDstPage[0] = 'a';
-	virtDstPage[1] = 0;
+	// 0 -> Active
+	// 8 -> DREQ
+	// a -> END + DREQ
+	// 21 -> ACTIVE + INT + PAUSED
+	// printk("DMA phys HEADER ADDR: %llx\n", virt_to_phys(dmaHeader));
 
-	printk("Before Dma: %s\n", (char *) virtDstPage);
-	writeBitmasked(start + DMAENABLE / 4, 1 << dmaChNum,
-		       1 << dmaChNum);
-	dmaHeader =
-	    (struct DmaChannelHeader *) (start + (DMACH(dmaChNum)) / 4);
+	printk("DMA STATUS REGISTER (Before TX) %x\n", dmaHeader->CS);
 	dmaHeader->CS = DMA_CS_RESET;	//make sure to disable dma first.
-	mdelay(1000);		//give time for the reset command to be handled.
+	mdelay(2000);		//give time for the reset command to be handled.
 	dmaHeader->DEBUG = DMA_DEBUG_READ_ERROR | DMA_DEBUG_FIFO_ERROR | DMA_DEBUG_READ_LAST_NOT_SET_ERROR;	// clear debug error flags
-	dmaHeader->CONBLK_AD = (uint32_t)physCbPage;	//we have to point it to the PHYSICAL address of the control block (cb1)
+	dmaHeader->CONBLK_AD = (uint32_t)physCbPage | 0xc0000000;	//we have to point it to the PHYSICAL address of the control block (cb1)
+
+	printk("CURRENT SRC_ADDR: %x\n", dmaHeader->SOURCE_AD);
+	printk("CURRENT DEST_ADDR: %x\n", dmaHeader->DEST_AD);
+	printk("DMA STATUS REGISTER (After CB Before Active) %x\n", dmaHeader->CS);
 	dmaHeader->CS = DMA_CS_ACTIVE;	//set active bit, but everything else is 0.
-	mdelay(1000);
+	mdelay(9000);
 
-	printk("OUTPUT: %s\n", (char *) virtDstPage);
-	kunmap(start);
-	return -1;
+	printk("DMA STATUS REGISTER (AFTER Tx) %x\n", dmaHeader->CS);
+	printk("TI STATUS AFTER: %x\n", cb1->TI);
+	printk("DMA CONTROL BLOCK ADDR AFTER TX %x\n", dmaHeader->CONBLK_AD);
+
+	free_pages((unsigned long)virtCbPage, 0);
+	printk("AFTER CURRENT SRC_ADDR: %x\n", dmaHeader->SOURCE_AD);
+	printk("AFTER CURRENT DEST_ADDR: %x\n", dmaHeader->DEST_AD);
+	printk("dmaHeader src: %x\nphysrcpage -size: %x", dmaHeader->SOURCE_AD, (((uint32_t)physSrcPage | 0xc0000000) + size));
+	ret = (dmaHeader->SOURCE_AD - (((uint32_t)physSrcPage | 0xc0000000) + size));
+	mdelay(500);
+	// ret = 0;
+	return ret;
 }
-
-module_init(dma_attack_init);
-module_exit(dma_attack_cleanup);
-
-MODULE_DESCRIPTION("memory tests");
-MODULE_AUTHOR("Raz Ben Jehuda");
-MODULE_LICENSE("GPL");
